@@ -1,0 +1,61 @@
+# An isolated stack: never shares production volumes, DB, ports or RabbitMQ.
+x-test-env: &test-env
+  API_KEY: integration-test-key
+  DATABASE_URL: postgresql+asyncpg://postgres:integration-test-password@postgres:5432/payments_test
+  RABBITMQ_URL: amqp://integration:integration-test-password@rabbitmq:5672/
+  APP_DEBUG: "false"
+  CONSUME_LEGACY_QUEUE: "false"
+  RABBITMQ_PREFIX: smoke.payments
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: payments_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: integration-test-password
+    ports: ["15432:5432"]
+    tmpfs: ["/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d payments_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4.3.6-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: integration
+      RABBITMQ_DEFAULT_PASS: integration-test-password
+    ports: ["15673:5672", "15683:15672"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  migrate:
+    extends: {file: docker-compose.yml, service: migrate}
+    environment: *test-env
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    extends: {file: docker-compose.yml, service: api}
+    environment: *test-env
+    ports: !override ["18000:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  consumer:
+    extends: {file: docker-compose.yml, service: consumer}
+    environment: *test-env
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+
+  publisher:
+    extends: {file: docker-compose.yml, service: publisher}
+    environment: *test-env
+    depends_on:
+      migrate: {condition: service_completed_successfully}

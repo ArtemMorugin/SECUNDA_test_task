@@ -1,0 +1,100 @@
+x-app: &app
+  build: .
+  image: secunda-payments:local
+  init: true
+  restart: unless-stopped
+  environment: &environment
+    API_KEY: ${API_KEY:?Set API_KEY in .env}
+    DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/payments
+    RABBITMQ_URL: amqp://${RABBITMQ_USER:-payments}:${RABBITMQ_PASSWORD:-payments}@rabbitmq:5672/
+    APP_DEBUG: ${APP_DEBUG:-false}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    PAYMENT_PROCESSING_MIN_DELAY: ${PAYMENT_PROCESSING_MIN_DELAY:-2.0}
+    PAYMENT_PROCESSING_MAX_DELAY: ${PAYMENT_PROCESSING_MAX_DELAY:-5.0}
+    WEBHOOK_TIMEOUT_SECONDS: ${WEBHOOK_TIMEOUT_SECONDS:-5.0}
+    WEBHOOK_MAX_ATTEMPTS: ${WEBHOOK_MAX_ATTEMPTS:-3}
+    BROKER_TIMEOUT_SECONDS: ${BROKER_TIMEOUT_SECONDS:-5.0}
+    DELIVERY_LEASE_SECONDS: ${DELIVERY_LEASE_SECONDS:-30.0}
+    WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-1.0}
+    RETRY_BASE_SECONDS: ${RETRY_BASE_SECONDS:-1.0}
+    RABBITMQ_PREFIX: ${RABBITMQ_PREFIX:-payments}
+    CONSUME_LEGACY_QUEUE: ${CONSUME_LEGACY_QUEUE:-true}
+  stop_grace_period: 30s
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: payments
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports: ["5432:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d payments"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:4.3.6-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-payments}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-payments}
+    ports: ["5672:5672", "15672:15672"]
+    volumes: ["rabbitmq_data:/var/lib/rabbitmq"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    <<: *app
+    ports: ["8000:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.presentation.cli.healthcheck", "api"]
+      interval: 10s
+      timeout: 6s
+      retries: 5
+      start_period: 10s
+
+  consumer:
+    <<: *app
+    command: ["python", "-m", "src.presentation.cli.consumer"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.presentation.cli.healthcheck", "consumer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  publisher:
+    <<: *app
+    command: ["python", "-m", "src.presentation.cli.publisher"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.presentation.cli.healthcheck", "publisher"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
